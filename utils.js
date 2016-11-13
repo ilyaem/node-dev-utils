@@ -26,6 +26,7 @@ exports.hosting = function(options, params) {
         static: '/static/', // url part
         staticPath: './static/', // fs path
         index: 'index',
+        templateExt: '.dhx',
         resourceCallback: null
     }, options);
     
@@ -37,7 +38,7 @@ exports.hosting = function(options, params) {
     };
     var readTemplate = function(template, success, error) {
         try {
-            var compiled = require(options.templates + template + '.dhx');
+            var compiled = require(options.templates + template + options.templateExt);
             success(compiled);
         } catch(err) {
             if(options.notfound) {
@@ -56,11 +57,17 @@ exports.hosting = function(options, params) {
     var that = this;
     
     return function(req, res) {
-        var url = path.normalize(req.url);
-        if(url.indexOf(options.static) === 0 || url === '/favicon.ico') {
-            var extension = url.match(/\.[a-z]+$/);
-            url = url.substr(options.static.length);
-            readStatic(url, function success(data) {
+        if(options.host && req.headers.host !== options.host) {
+            res.statusCode = 500;
+            res.end();
+            return;
+        }
+        
+        var urlPath = path.normalize(req.url);
+        if(urlPath.indexOf(options.static) === 0 || urlPath === '/favicon.ico') {
+            var extension = urlPath.match(/\.[a-z]+$/);
+            urlPath = urlPath.substr(options.static.length);
+            readStatic(urlPath, function success(data) {
                 res.writeHead(200, {
                     'Content-Length': data.length,
                     'Content-Type': mimeTypes[extension] || 'text/plain'
@@ -83,12 +90,14 @@ exports.hosting = function(options, params) {
             });
     
             req.on('end', function() {
-                var urlParts = url.split('/');
-                var urlParams = that.parseGetParams(req);
+                var parsedUrl = url.parse(req.url, true);
+                var urlParts = parsedUrl.pathname.split('/');
+                var urlParams = parsedUrl.query || {};
                 var postData = that.getPostData(req, reqData);
+                var cookies = that.parseCookies(req);
                 
                 if(options.resourceCallback) {
-                    options.resourceCallback(req, res, urlParts, urlParams, postData);
+                    options.resourceCallback(req, res, urlParts, urlParams, postData, cookies);
                 
                 } else {
                     var template = urlParts[1];
@@ -120,10 +129,6 @@ exports.hosting = function(options, params) {
     };
 };
 
-exports.parseGetParams = function(req) {
-    return url.parse(req.url, true).query || {};
-};
-
 exports.getPostData = function(req, data) {
     var post;
     if(req.method === 'POST' && req.headers['Content-Type'] === 'x-www-form-urlencoded') {
@@ -133,6 +138,18 @@ exports.getPostData = function(req, data) {
         post: data
     };
 };
+
+exports.parseCookies = function(req) {
+    var list = {},
+        cookies = req.headers.cookie;
+    
+    cookies && cookies.split(';').forEach(function( cookie ) {
+        var parts = cookie.split('=');
+        list[parts.shift().trim()] = decodeURI(parts.join('='));
+    });
+    
+    return list;
+}
 
 exports.merge = function(objects) {
     var target = {};
