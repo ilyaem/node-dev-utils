@@ -124,6 +124,8 @@ exports.hosting = function(options, params) {
 exports.https = function(target, callback, options) {
     var that = this;
     options = options || {};
+    options.maxBody = options.maxBody || MAX_BODY;
+    
     var parsedUrl = url.parse(target);
     https.request({
         protocol: parsedUrl.protocol,
@@ -131,19 +133,22 @@ exports.https = function(target, callback, options) {
         path: parsedUrl.path || '/',
         method: options.method || 'GET'
     }, function(res) {
-        that.processPost(res, callback);
+        that.processPost(res, callback, options);
         
     }).on('error', function(error) {
         callback(error, null, null);
     }).end();
 };
 
-exports.processPost = function(res, callback) {
+exports.processPost = function(res, callback, options) {
+    options.contentQuery = options.contentQuery || [ 'x-www-form-urlencoded', 'text/plain' ];
+    options.contentJson = options.contentJson || [ 'application/json', 'text/javascript' ];
+    
     var postData = '';
     var err = null;
     res.on('data', function(chunk) {
         postData += chunk;
-        if(postData.length > MAX_BODY) {
+        if(postData.length > options.maxBody) {
             res.writeHead(413, { 'Content-Type':'text/plain' }).end();
             res.connection.destroy();
             err = new Error('Too long request');
@@ -151,10 +156,10 @@ exports.processPost = function(res, callback) {
     });
     res.on('end', function() {
         var contentType = res.headers['content-type'].split(';')[0];
-        if(contentType === 'x-www-form-urlencoded' || contentType === 'text/plain') {
+        if(options.contentQuery.indexOf(contentType) !== -1) {
             postData = querystring.parse(postData);
             
-        } else if(contentType === 'application/json') {
+        } else if(options.contentJson.indexOf(contentType) !== -1) {
             try {
                 postData = JSON.parse(postData);
             } catch(err) {}
@@ -173,7 +178,7 @@ exports.parseCookies = function(req) {
     });
     
     return list;
-}
+};
 
 exports.merge = function(objects) {
     var target = {};
