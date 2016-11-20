@@ -1,6 +1,9 @@
-var path = require('path'),
-    url = require('url'),
-    querystring = require('querystring');
+const   path = require('path'),
+        url = require('url'),
+        https = require('https'),
+        querystring = require('querystring');
+
+const MAX_BODY = 1e6;
 
 exports.basicAuth = function(req, res, username, password) {
     var credentials = [];
@@ -23,7 +26,7 @@ exports.hosting = function(options, params) {
     options = this.merge({
         templates: './views/',
         notfound: '',
-        static: '/static/', // url part
+        'static': '/static/', // url part
         staticPath: './static/', // fs path
         index: 'index',
         templateExt: '.dhx',
@@ -79,21 +82,10 @@ exports.hosting = function(options, params) {
             });
             
         } else {
-            var reqData = '';
-            req.on('data', function(data) {
-                reqData += data;
-                if(reqData.length > 1e6) {
-                    reqData = '';
-                    res.writeHead(413, { 'Content-Type':'text/plain' }).end();
-                    req.connection.destroy();
-                }
-            });
-    
-            req.on('end', function() {
+            that.processPost(res, function(err, postData) {
                 var parsedUrl = url.parse(req.url, true);
                 var urlParts = parsedUrl.pathname.split('/');
                 var urlParams = parsedUrl.query || {};
-                var postData = that.getPostData(req, reqData);
                 var cookies = that.parseCookies(req);
                 
                 if(options.resourceCallback) {
@@ -129,14 +121,46 @@ exports.hosting = function(options, params) {
     };
 };
 
-exports.getPostData = function(req, data) {
-    var post;
-    if(req.method === 'POST' && req.headers['Content-Type'] === 'x-www-form-urlencoded') {
-        post = querystring.parse(data);
-    }
-    return post || {
-        post: data
-    };
+exports.https = function(target, callback, options) {
+    var that = this;
+    options = options || {};
+    var parsedUrl = url.parse(target);
+    https.request({
+        protocol: parsedUrl.protocol,
+        hostname: parsedUrl.host,
+        path: parsedUrl.path || '/',
+        method: options.method || 'GET'
+    }, function(res) {
+        that.processPost(res, callback);
+        
+    }).on('error', function(error) {
+        callback(error, null, null);
+    }).end();
+};
+
+exports.processPost = function(res, callback) {
+    var postData = '';
+    var err = null;
+    res.on('data', function(chunk) {
+        postData += chunk;
+        if(postData.length > MAX_BODY) {
+            res.writeHead(413, { 'Content-Type':'text/plain' }).end();
+            res.connection.destroy();
+            err = new Error('Too long request');
+        }
+    });
+    res.on('end', function() {
+        var contentType = res.headers['content-type'].split(';')[0];
+        if(contentType === 'x-www-form-urlencoded' || contentType === 'text/plain') {
+            postData = querystring.parse(postData);
+            
+        } else if(contentType === 'application/json') {
+            try {
+                postData = JSON.parse(postData);
+            } catch(err) {}
+        }
+        callback(err, postData, res);
+    });
 };
 
 exports.parseCookies = function(req) {
