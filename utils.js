@@ -25,12 +25,14 @@ exports.basicAuth = function(req, res, username, password) {
 exports.hosting = function(options, params) {
     options = this.merge({
         templates: './views/',
+        staticTemplates: true,
         notfound: '',
         'static': '/static/', // url part
         staticPath: './static/', // fs path
         index: 'index',
-        templateExt: '.dhx',
-        resourceCallback: null
+        templateExt: '.html',
+        resourceCallback: null,
+        maxBody: MAX_BODY
     }, options);
     
     var mimeTypes = {
@@ -41,8 +43,14 @@ exports.hosting = function(options, params) {
     };
     var readTemplate = function(template, success, error) {
         try {
-            var compiled = require(options.templates + template + options.templateExt);
-            success(compiled);
+            if(options.staticTemplates) {
+                require('fs').readFile(options.templates + template + options.templateExt, function(err, data) {
+                    err ? error(err) : success(data);
+                });
+            } else {
+                var compiled = require(options.templates + template + options.templateExt);
+                success(compiled);
+            }
         } catch(err) {
             if(options.notfound) {
                 readTemplate(options.notfound, success, error);
@@ -82,7 +90,13 @@ exports.hosting = function(options, params) {
             });
             
         } else {
-            that.processPost(res, function(err, postData) {
+            that.processPost(req, function(err, postData) {
+                if(err) {
+                    res.writeHead(err === 413 ? 413 : 500, { 'Content-Type':'text/plain' });
+                    res.end();
+                    return;
+                }
+                
                 var parsedUrl = url.parse(req.url, true);
                 var urlParts = parsedUrl.pathname.split('/');
                 var urlParams = parsedUrl.query || {};
@@ -96,10 +110,14 @@ exports.hosting = function(options, params) {
                     if(!template) template = options.index;
                     readTemplate(template, function success(compiled) {
                         var data;
-                        try {
-                            data = compiled.render(that.merge(params, urlParams));
-                        } catch(err) {
-                            data = 'Render error: ' + err.message;
+                        if(options.staticTemplates) {
+                            data = compiled;
+                        } else {
+                            try {
+                                data = compiled.render(that.merge(params, urlParams));
+                            } catch(err) {
+                                data = 'Render error: ' + err.message;
+                            }
                         }
                         res.writeHead(200, {
                             'Content-Length': data.length,
@@ -116,7 +134,7 @@ exports.hosting = function(options, params) {
                         res.end(data);
                     });
                 }
-            });
+            }, options);
         }
     };
 };
@@ -140,31 +158,40 @@ exports.https = function(target, callback, options) {
     }).end();
 };
 
-exports.processPost = function(res, callback, options) {
+exports.processPost = function(message, callback, options) {
+    options = options || {};
     options.contentQuery = options.contentQuery || [ 'x-www-form-urlencoded', 'text/plain' ];
     options.contentJson = options.contentJson || [ 'application/json', 'text/javascript' ];
     
+    var maxLength = message.headers['content-length'] || 0;
+    if(maxLength > options.maxBody) {
+        message.resume && message.resume();
+        message.connection && message.connection.destroy();
+        return callback(413, null);
+    }
+    
     var postData = '';
-    var err = null;
-    res.on('data', function(chunk) {
+    message.on('data', function(chunk) {
         postData += chunk;
-        if(postData.length > options.maxBody) {
-            res.writeHead(413, { 'Content-Type':'text/plain' }).end();
-            res.connection.destroy();
-            err = new Error('Too long request');
+        if(postData.length > maxLength) {
+            message.resume && message.resume();
+            message.connection && message.connection.destroy();
         }
     });
-    res.on('end', function() {
-        var contentType = res.headers['content-type'].split(';')[0];
-        if(options.contentQuery.indexOf(contentType) !== -1) {
-            postData = querystring.parse(postData);
-            
-        } else if(options.contentJson.indexOf(contentType) !== -1) {
-            try {
-                postData = JSON.parse(postData);
-            } catch(err) {}
+    message.on('end', function() {
+        var contentType = message.headers['content-type'];
+        if(contentType) {
+            contentType = contentType.split(';')[0];
+            if(options.contentQuery.indexOf(contentType) !== -1) {
+                postData = querystring.parse(postData);
+                
+            } else if(options.contentJson.indexOf(contentType) !== -1) {
+                try {
+                    postData = JSON.parse(postData);
+                } catch(err) {}
+            }
         }
-        callback(err, postData, res);
+        callback(null, postData);
     });
 };
 
