@@ -23,23 +23,27 @@ exports.basicAuth = function(req, res, username, password) {
 };
 
 exports.hosting = function(options, params) {
-    options = this.merge({
+    options = Object.assign({
+        hosts: null,
         templates: './views/',
         staticTemplates: true,
         notfound: '',
-        'static': '/static/', // url part
+        staticAlias: '/static/', // url part
         staticPath: './static/', // fs path
         index: 'index',
         templateExt: '.html',
         resourceCallback: null,
-        maxBody: MAX_BODY
+        maxBody: MAX_BODY,
+        auth: { username:null, password:null },
+        errors: { 404:null, 500:null }
     }, options);
     
     var mimeTypes = {
         '.js': 'application/javascript',
         '.css': 'text/css',
         '.png': 'image/png',
-        '.ico': 'image/x-icon'
+        '.ico': 'image/x-icon',
+        '.svg': 'image/svg+xml'
     };
     var readTemplate = function(template, success, error) {
         try {
@@ -59,80 +63,105 @@ exports.hosting = function(options, params) {
             }
         }
     };
-    var readStatic = function(path, success, error) {
-        require('fs').readFile(options.staticPath + path, function(err, data) {
+    var readStatic = function(path, success, error, absPath) {
+        require('fs').readFile((absPath ? options.templates : options.staticPath) + path, function(err, data) {
             err ? error(err) : success(data);
         });
+    };
+    var respond = function(res, data, status, contentType) {
+        if(status !== 200) {
+            var value = options.errors[status];
+            if(typeof(value) === 'function') value = value(status, data);
+            if(value !== null) data = value;
+        }
+        
+        res.writeHead(status || 200, !data ? null : {
+            'Content-Length': data.length,
+            'Content-Type': contentType || 'text/plain'
+        });
+        res.end(data);
     };
     
     var that = this;
     
     return function(req, res) {
-        if(options.host && req.headers.host !== options.host) {
+        var hostPath = options.hosts[req.headers.host];
+        if(options.hosts && hostPath === undefined) {
             res.statusCode = 500;
             res.end();
             return;
         }
         
-        var urlPath = path.normalize(req.url);
-        if(urlPath.indexOf(options.static) === 0 || urlPath === '/favicon.ico') {
+        if(options.auth.username && !that.basicAuth(req, res, options.auth.username, options.auth.password)) {
+            return;
+        }
+        
+        var urlPath = path.normalize(hostPath + req.url);
+        if(urlPath.indexOf(options.staticAlias) === 0 || urlPath === '/favicon.ico') {
             var extension = urlPath.match(/\.[a-z]+$/);
-            urlPath = urlPath.substr(options.static.length);
+            urlPath = urlPath.substr(options.staticAlias.length);
             readStatic(urlPath, function success(data) {
-                res.writeHead(200, {
-                    'Content-Length': data.length,
-                    'Content-Type': mimeTypes[extension] || 'text/plain'
-                });
-                res.end(data);
+                respond(res, data, 200, mimeTypes[extension]);
             }, function error() {
                 res.writeHead(404);
                 res.end();
             });
             
         } else {
-            that.processPost(req, function(err, postData) {
-                if(err) {
-                    res.writeHead(err === 413 ? 413 : 500, { 'Content-Type':'text/plain' });
-                    res.end();
-                    return;
-                }
-                
-                var parsedUrl = url.parse(req.url, true);
-                var urlParts = parsedUrl.pathname.split('/');
-                var urlParams = parsedUrl.query || {};
-                var cookies = that.parseCookies(req);
-                
-                if(options.resourceCallback) {
-                    options.resourceCallback(req, res, urlParts, urlParams, postData, cookies);
-                
+            req.cookies = that.parseCookies(req);
+            res.readTemplate = readTemplate;
+            res.readStatic = readStatic;
+            res.respond = respond.bind(this, res);
+            res.render = function(template, parsedUrl, postData, extension) {
+                if(extension != options.templateExt) {
+                    readStatic(template + extension, function success(data) {
+                        respond(res, data, 200, mimeTypes[extension]);
+                    }, function error() {
+                        res.writeHead(404);
+                        res.end();
+                    }, true);
                 } else {
-                    var template = urlParts[1];
-                    if(!template) template = options.index;
                     readTemplate(template, function success(compiled) {
                         var data;
                         if(options.staticTemplates) {
                             data = compiled;
                         } else {
                             try {
-                                data = compiled.render(that.merge(params, urlParams));
+                                data = compiled.render(Object.assign(params, parsedUrl.query || {}));
                             } catch(err) {
                                 data = 'Render error: ' + err.message;
                             }
                         }
-                        res.writeHead(200, {
-                            'Content-Length': data.length,
-                            'Content-Type': 'text/html; charset=utf-8'
-                        });
-                        res.end(data);
+                        respond(res, data, 200, 'text/html');
                         
                     }, function error(err) {
-                        var data = 'Render error: ' + err.message;
-                        res.writeHead(404, {
-                            'Content-Length': data.length,
-                            'Content-Type': 'text/html; charset=utf-8'
-                        });
-                        res.end(data);
+                        respond(res, 'Render error: ' + err.message, 404);
                     });
+                }
+            };
+            
+            that.processPost(req, function(err, postData) {
+                if(err) {
+                    respond(res, 'Error', err === 413 ? 413 : 500);
+                    return;
+                }
+                
+                var parsedUrl = url.parse(req.url, true);
+                
+                if(options.resourceCallback) {
+                    options.resourceCallback(req, res, parsedUrl, postData);
+                
+                } else {
+                    var template = urlPath || options.index;
+                    var extension = options.templateExt;
+                    var extPos = template.indexOf('.', template.length - 5);
+                    if(extPos !== -1) {
+                        extension = template.substring(extPos);
+                        template = template.substring(0, extPos);
+                    } else if(template[template.length - 1] === '/') {
+                        template += options.index;
+                    }
+                    res.render(template, parsedUrl, postData, extension);
                 }
             }, options);
         }
@@ -160,10 +189,10 @@ exports.https = function(target, callback, options) {
 
 exports.processPost = function(message, callback, options) {
     options = options || {};
-    options.contentQuery = options.contentQuery || [ 'x-www-form-urlencoded', 'text/plain' ];
+    options.contentQuery = options.contentQuery || [ 'application/x-www-form-urlencoded', 'text/plain' ];
     options.contentJson = options.contentJson || [ 'application/json', 'text/javascript' ];
     
-    var maxLength = message.headers['content-length'] || 0;
+    var maxLength = message.headers['content-length'] || options.maxBody;
     if(maxLength > options.maxBody) {
         message.resume && message.resume();
         message.connection && message.connection.destroy();
@@ -180,7 +209,7 @@ exports.processPost = function(message, callback, options) {
     });
     message.on('end', function() {
         var contentType = message.headers['content-type'];
-        if(contentType) {
+        if(contentType && !options.preventContentParse) {
             contentType = contentType.split(';')[0];
             if(options.contentQuery.indexOf(contentType) !== -1) {
                 postData = querystring.parse(postData);
@@ -205,13 +234,4 @@ exports.parseCookies = function(req) {
     });
     
     return list;
-};
-
-exports.merge = function(objects) {
-    var target = {};
-    var args = Array.prototype.slice.call(arguments);
-    for(var i in args) {
-        for(var key in args[i]) target[key] = args[i][key];
-    }
-    return target;
 };
