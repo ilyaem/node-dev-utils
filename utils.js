@@ -39,12 +39,25 @@ exports.hosting = function(options, params) {
     }, options);
     
     var mimeTypes = {
-        '.js': 'application/javascript',
-        '.css': 'text/css',
-        '.png': 'image/png',
-        '.ico': 'image/x-icon',
-        '.svg': 'image/svg+xml'
+        text: {
+            '.html': 'text/html',
+            '.js': 'application/javascript',
+            '.css': 'text/css'
+        },
+        binary: {
+            '.png': 'image/png',
+            '.ico': 'image/x-icon',
+            '.svg': 'image/svg+xml'
+        }
     };
+    var getContentType = function(extension) {
+        if(extension && mimeTypes.binary[extension]) {
+            return mimeTypes.binary[extension];
+        } else {
+            return (mimeTypes.text[extension] || 'text/plain') + '; charset=utf-8';
+        }
+    };
+    
     var readTemplate = function(template, success, error) {
         try {
             if(options.staticTemplates) {
@@ -68,7 +81,7 @@ exports.hosting = function(options, params) {
             err ? error(err) : success(data);
         });
     };
-    var respond = function(res, data, status, contentType) {
+    var respond = function(res, data, status, extension) {
         if(status !== 200) {
             var value = options.errors[status];
             if(typeof(value) === 'function') value = value(status, data);
@@ -77,7 +90,7 @@ exports.hosting = function(options, params) {
         
         res.writeHead(status || 200, !data ? null : {
             'Content-Length': data.length,
-            'Content-Type': contentType || 'text/plain'
+            'Content-Type': getContentType(extension)
         });
         res.end(data);
     };
@@ -101,7 +114,7 @@ exports.hosting = function(options, params) {
             var extension = urlPath.match(/\.[a-z]+$/);
             urlPath = urlPath.substr(options.staticAlias.length);
             readStatic(urlPath, function success(data) {
-                respond(res, data, 200, mimeTypes[extension]);
+                respond(res, data, 200, extension);
             }, function error() {
                 res.writeHead(404);
                 res.end();
@@ -115,7 +128,7 @@ exports.hosting = function(options, params) {
             res.render = function(template, parsedUrl, postData, extension) {
                 if(extension != options.templateExt) {
                     readStatic(template + extension, function success(data) {
-                        respond(res, data, 200, mimeTypes[extension]);
+                        respond(res, data, 200, extension);
                     }, function error() {
                         res.writeHead(404);
                         res.end();
@@ -132,7 +145,7 @@ exports.hosting = function(options, params) {
                                 data = 'Render error: ' + err.message;
                             }
                         }
-                        respond(res, data, 200, 'text/html');
+                        respond(res, data, 200, options.templateExt);
                         
                     }, function error(err) {
                         respond(res, 'Render error: ' + err.message, 404);
