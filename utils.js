@@ -4,6 +4,33 @@ const   path = require('path'),
         querystring = require('querystring');
 
 const MAX_BODY = 1e6;
+const STATIC_PATHS = [
+    '/favicon.ico'
+];
+const MIME_PLAIN_TEXT = 'text/plain';
+const MIME_BINARY = 'application/octet-stream';
+const MIME_ENCODED = 'application/x-www-form-urlencoded';
+const MIME_JAVASCRIPT = 'application/javascript';
+const MIME_JSON = 'application/json';
+const MIME_TYPES = {
+    '.txt': MIME_PLAIN_TEXT,
+    '.html': 'text/html',
+    '.js': MIME_JAVASCRIPT,
+    '.css': 'text/css',
+    '.xml': 'text/xml',
+    '.json': MIME_JSON,
+    '.jpg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.ico': 'image/x-icon',
+    '.svg': 'image/svg+xml',
+    '.ttf': 'font/truetype',
+    '.otf': 'font/opentype',
+    '.mp4': 'video/mp4',
+    '.mp3': 'audio/mpeg',
+    '.zip': 'application/zip'
+};
+const TEXT_FORMATS = [ '.txt','.html', '.js', '.css', '.xml', '.json' ];
 
 exports.basicAuth = function(req, res, username, password) {
     var credentials = [];
@@ -23,49 +50,36 @@ exports.basicAuth = function(req, res, username, password) {
 };
 
 exports.hosting = function(options, params) {
+    var that = this;
+    
     options = Object.assign({
         hosts: null,
-        templates: './views/',
-        staticTemplates: true,
-        notfound: '',
-        staticAlias: '/static/', // url part
-        staticPath: './static/', // fs path
-        index: 'index',
-        templateExt: '.html',
-        resourceCallback: null,
-        maxBody: MAX_BODY,
         auth: { username:null, password:null },
-        errors: { 404:null, 500:null }
+        errors: { 404:null, 500:null },
+        resourceCallback: null,
+        
+        templatesPath: './views/',
+        templatesStatic: true,
+        templateExt: '.html',
+        index: 'index',
+        notfound: '',
+        
+        staticUrl: '/static/', // url part
+        staticPath: './static/', // fs path
+        
+        maxBody: MAX_BODY,
+        mimeTypes: MIME_TYPES,
+        staticAliases: STATIC_PATHS
     }, options);
-    
-    var mimeTypes = {
-        text: {
-            '.html': 'text/html',
-            '.js': 'application/javascript',
-            '.css': 'text/css'
-        },
-        binary: {
-            '.png': 'image/png',
-            '.ico': 'image/x-icon',
-            '.svg': 'image/svg+xml'
-        }
-    };
-    var getContentType = function(extension) {
-        if(extension && mimeTypes.binary[extension]) {
-            return mimeTypes.binary[extension];
-        } else {
-            return (mimeTypes.text[extension] || 'text/plain') + '; charset=utf-8';
-        }
-    };
     
     var readTemplate = function(template, success, error) {
         try {
-            if(options.staticTemplates) {
-                require('fs').readFile(options.templates + template + options.templateExt, function(err, data) {
+            if(options.templatesStatic) {
+                require('fs').readFile(options.templatesPath + template + options.templateExt, function(err, data) {
                     err ? error(err) : success(data);
                 });
             } else {
-                var compiled = require(options.templates + template + options.templateExt);
+                var compiled = require(options.templatesPath + template + options.templateExt);
                 success(compiled);
             }
         } catch(err) {
@@ -77,11 +91,11 @@ exports.hosting = function(options, params) {
         }
     };
     var readStatic = function(path, success, error, absPath) {
-        require('fs').readFile((absPath ? options.templates : options.staticPath) + path, function(err, data) {
+        require('fs').readFile((absPath ? options.templatesPath : options.staticPath) + path, function(err, data) {
             err ? error(err) : success(data);
         });
     };
-    var respond = function(res, data, status, extension) {
+    var respond = function(res, data, status, isBinary, extension) {
         if(status !== 200) {
             var value = options.errors[status];
             if(typeof(value) === 'function') value = value(status, data);
@@ -90,12 +104,10 @@ exports.hosting = function(options, params) {
         
         res.writeHead(status || 200, !data ? null : {
             'Content-Length': data.length,
-            'Content-Type': getContentType(extension)
+            'Content-Type': that.getMimeType(extension, options.mimeTypes, isBinary, true)
         });
         res.end(data);
     };
-    
-    var that = this;
     
     return function(req, res) {
         var hostPath = options.hosts[req.headers.host];
@@ -110,11 +122,11 @@ exports.hosting = function(options, params) {
         }
         
         var urlPath = path.normalize(hostPath + req.url);
-        if(urlPath.indexOf(options.staticAlias) === 0 || urlPath === '/favicon.ico') {
+        if(urlPath.indexOf(options.staticUrl) === 0 || options.staticAliases.indexOf(urlPath) !== -1) {
             var extension = urlPath.match(/\.[a-z]+$/);
-            urlPath = urlPath.substr(options.staticAlias.length);
+            urlPath = urlPath.substr(options.staticUrl.length);
             readStatic(urlPath, function success(data) {
-                respond(res, data, 200, extension);
+                respond(res, data, 200, true, extension);
             }, function error() {
                 res.writeHead(404);
                 res.end();
@@ -128,7 +140,7 @@ exports.hosting = function(options, params) {
             res.render = function(template, parsedUrl, postData, extension) {
                 if(extension != options.templateExt) {
                     readStatic(template + extension, function success(data) {
-                        respond(res, data, 200, extension);
+                        respond(res, data, 200, true, extension);
                     }, function error() {
                         res.writeHead(404);
                         res.end();
@@ -136,7 +148,7 @@ exports.hosting = function(options, params) {
                 } else {
                     readTemplate(template, function success(compiled) {
                         var data;
-                        if(options.staticTemplates) {
+                        if(options.templatesStatic) {
                             data = compiled;
                         } else {
                             try {
@@ -145,7 +157,7 @@ exports.hosting = function(options, params) {
                                 data = 'Render error: ' + err.message;
                             }
                         }
-                        respond(res, data, 200, options.templateExt);
+                        respond(res, data, 200, false, options.templateExt);
                         
                     }, function error(err) {
                         respond(res, 'Render error: ' + err.message, 404);
@@ -162,20 +174,20 @@ exports.hosting = function(options, params) {
                 var parsedUrl = url.parse(req.url, true);
                 
                 if(options.resourceCallback) {
-                    options.resourceCallback(req, res, parsedUrl, postData);
-                
-                } else {
-                    var template = urlPath || options.index;
-                    var extension = options.templateExt;
-                    var extPos = template.indexOf('.', template.length - 5);
-                    if(extPos !== -1) {
-                        extension = template.substring(extPos);
-                        template = template.substring(0, extPos);
-                    } else if(template[template.length - 1] === '/') {
-                        template += options.index;
-                    }
-                    res.render(template, parsedUrl, postData, extension);
+                    var result = options.resourceCallback(req, res, parsedUrl, postData);
+                    if(result) return;
                 }
+                
+                var template = urlPath || options.index;
+                var extension = options.templateExt;
+                var extPos = template.indexOf('.', template.length - 5);
+                if(extPos !== -1) {
+                    extension = template.substring(extPos);
+                    template = template.substring(0, extPos);
+                } else if(template[template.length - 1] === '/') {
+                    template += options.index;
+                }
+                res.render(template, parsedUrl, postData, extension);
             }, options);
         }
     };
@@ -202,8 +214,8 @@ exports.https = function(target, callback, options) {
 
 exports.processPost = function(message, callback, options) {
     options = options || {};
-    options.contentQuery = options.contentQuery || [ 'application/x-www-form-urlencoded', 'text/plain' ];
-    options.contentJson = options.contentJson || [ 'application/json', 'text/javascript' ];
+    options.contentQuery = options.contentQuery || [ MIME_ENCODED, MIME_PLAIN_TEXT ];
+    options.contentJson = options.contentJson || [ MIME_JSON, MIME_JAVASCRIPT ];
     
     var maxLength = message.headers['content-length'] || options.maxBody;
     if(maxLength > options.maxBody) {
@@ -247,4 +259,19 @@ exports.parseCookies = function(req) {
     });
     
     return list;
+};
+
+exports.getMimeType = function(extension, mimeTypes, isBinary, addCharset) {
+    var mimeType;
+    var isTrueBinary;
+    
+    if(extension) {
+        mimeType = mimeTypes[extension];
+        isTrueBinary = mimeType ? TEXT_FORMATS.indexOf(extension) === -1 : isBinary;
+        mimeType = mimeType || (isTrueBinary ? MIME_BINARY : MIME_PLAIN_TEXT);
+    } else {
+        mimeType = isBinary ? MIME_BINARY : MIME_PLAIN_TEXT;
+    }
+    
+    return mimeType + (addCharset && !isTrueBinary ? '; charset=utf-8' : '');
 };
