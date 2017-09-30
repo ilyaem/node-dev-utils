@@ -5,7 +5,8 @@ const   path = require('path'),
 
 const MAX_BODY = 1e6;
 const STATIC_PATHS = [
-    '/favicon.ico'
+    '/favicon.ico',
+    '/robots.txt'
 ];
 const MIME_PLAIN_TEXT = 'text/plain';
 const MIME_BINARY = 'application/octet-stream';
@@ -58,43 +59,73 @@ exports.hosting = function(options, params) {
         errors: { 404:null, 500:null },
         resourceCallback: null,
         
-        templatesPath: './views/',
-        templatesStatic: true,
-        templateExt: '.html',
-        index: 'index',
+        basePath: process.cwd(),
+        templatesPath: '/views/', // fs path
+        executable: [ '.js' ],
+        executablePrefix: 'ctrl.', // only ctrl.file.js will execute
+        index: [ 'index.html', 'index.js' ],
         notfound: '',
         
         staticUrl: '/static/', // url part
-        staticPath: './static/', // fs path
+        staticPath: '/static/', // fs path
         
         maxBody: MAX_BODY,
         mimeTypes: MIME_TYPES,
         staticAliases: STATIC_PATHS
     }, options);
     
-    var readTemplate = function(template, success, error) {
+    options.index = (!options.index ? [] : (typeof(options.index) === 'string' ? [ options.index ] : options.index));
+    
+    var readTemplate = function(hostPath, filePath, fileName, success, error, forceStatic) {
+        var isIndex = options.index.indexOf(fileName) + 1;
+        var isNotfound = (fileName === options.notfound);
+        
+        var fileExt = path.extname(fileName);
+        var isExecutable = (options.executable.indexOf(fileExt) !== -1) && !forceStatic;
+        
+        var fullPath = path.join(options.basePath, options.templatesPath, hostPath, filePath);
+        fullPath = path.join(fullPath, (isExecutable ? options.executablePrefix : '') + fileName);
+        var compiled;
+        
+        var failureCase = function() {
+            if(isExecutable) {
+                readTemplate(hostPath, filePath, fileName, success, error, true);
+                
+            } else if(isIndex && isIndex < options.index.length) {
+                readTemplate(hostPath, filePath, options.index[isIndex], success, error);
+                
+            } else if(!isNotfound && options.notfound) {
+                readTemplate(hostPath, filePath, options.notfound, success, error);
+                
+            } else {
+                return false;
+            }
+            return true;
+        };
+        
         try {
-            if(options.templatesStatic) {
-                require('fs').readFile(options.templatesPath + template + options.templateExt, function(err, data) {
-                    err ? error(err) : success(data);
+            if(isExecutable) {
+                compiled = require(fullPath);
+                success(compiled, isExecutable);
+                
+            } else {
+                compiled = require('fs').readFile(fullPath, function(err, data) {
+                    err ? failureCase() || error(err, isExecutable) : success(data, isExecutable);
                 });
-            } else {
-                var compiled = require(options.templatesPath + template + options.templateExt);
-                success(compiled);
             }
+            
         } catch(err) {
-            if(options.notfound) {
-                readTemplate(options.notfound, success, error);
-            } else {
-                error(err);
-            }
+            failureCase() || error(err, isExecutable);
         }
     };
-    var readStatic = function(path, success, error, absPath) {
-        require('fs').readFile((absPath ? options.templatesPath : options.staticPath) + path, function(err, data) {
+    
+    var readStatic = function(hostPath, filePath, fileName, success, error) {
+        var fullPath = path.join(options.basePath, hostPath, options.staticPath, filePath, fileName);
+        require('fs').readFile(fullPath, function(err, data) {
             err ? error(err) : success(data);
         });
     };
+    
     var respond = function(res, data, status, isBinary, extension) {
         if(status !== 200) {
             var value = options.errors[status];
@@ -121,12 +152,20 @@ exports.hosting = function(options, params) {
             return;
         }
         
-        var urlPath = path.normalize(hostPath + req.url);
-        if(urlPath.indexOf(options.staticUrl) === 0 || options.staticAliases.indexOf(urlPath) !== -1) {
-            var extension = urlPath.match(/\.[a-z]+$/);
+        var parsedUrl = url.parse(req.url, true);
+        var reqPath = parsedUrl.pathname || '/';
+        
+        var urlLastSlash = reqPath.lastIndexOf('/');
+        
+        var urlPath = reqPath.substr(0, urlLastSlash + 1) || '/';
+        var urlName = reqPath.substr(urlLastSlash + 1);
+        
+        var isStaticResource = (urlPath.indexOf(options.staticUrl) === 0 || options.staticAliases.indexOf(urlPath) !== -1);
+        
+        if(isStaticResource) {
             urlPath = urlPath.substr(options.staticUrl.length);
-            readStatic(urlPath, function success(data) {
-                respond(res, data, 200, true, extension);
+            readStatic(hostPath, urlPath, urlName, function success(data) {
+                respond(res, data, 200, true, path.extname(urlName));
             }, function error() {
                 res.writeHead(404);
                 res.end();
@@ -134,35 +173,27 @@ exports.hosting = function(options, params) {
             
         } else {
             req.cookies = that.parseCookies(req);
-            res.readTemplate = readTemplate;
-            res.readStatic = readStatic;
+            res.readTemplate = readTemplate.bind(this, hostPath);
+            res.readStatic = readStatic.bind(this, hostPath);
             res.respond = respond.bind(this, res);
-            res.render = function(template, parsedUrl, postData, extension) {
-                if(extension != options.templateExt) {
-                    readStatic(template + extension, function success(data) {
-                        respond(res, data, 200, true, extension);
-                    }, function error() {
-                        res.writeHead(404);
-                        res.end();
-                    }, true);
-                } else {
-                    readTemplate(template, function success(compiled) {
-                        var data;
-                        if(options.templatesStatic) {
-                            data = compiled;
-                        } else {
-                            try {
-                                data = compiled.render(Object.assign(params, parsedUrl.query || {}));
-                            } catch(err) {
-                                data = 'Render error: ' + err.message;
-                            }
-                        }
-                        respond(res, data, 200, false, options.templateExt);
+            res.render = function(filePath, fileName, parsedUrl, postData) {
+                readTemplate(hostPath, filePath, fileName, function success(compiled, isExecutable) {
+                    var data;
+                    if(!isExecutable) {
+                        data = compiled;
                         
-                    }, function error(err) {
-                        respond(res, 'Render error: ' + err.message, 404);
-                    });
-                }
+                    } else {
+                        try {
+                            data = compiled(Object.assign(params, parsedUrl.query || {}));
+                        } catch(err) {
+                            data = 'Render error: ' + err.message;
+                        }
+                    }
+                    respond(res, data, 200, false, path.extname(fileName));
+                    
+                }, function error(err) {
+                    respond(res, 'Render error: ' + err.message, 404);
+                });
             };
             
             that.processPost(req, function(err, postData) {
@@ -171,23 +202,12 @@ exports.hosting = function(options, params) {
                     return;
                 }
                 
-                var parsedUrl = url.parse(req.url, true);
-                
                 if(options.resourceCallback) {
                     var result = options.resourceCallback(req, res, parsedUrl, postData);
                     if(result) return;
                 }
                 
-                var template = urlPath || options.index;
-                var extension = options.templateExt;
-                var extPos = template.indexOf('.', template.length - 5);
-                if(extPos !== -1) {
-                    extension = template.substring(extPos);
-                    template = template.substring(0, extPos);
-                } else if(template[template.length - 1] === '/') {
-                    template += options.index;
-                }
-                res.render(template, parsedUrl, postData, extension);
+                res.render(urlPath, urlName || options.index[0], parsedUrl, postData);
             }, options);
         }
     };
